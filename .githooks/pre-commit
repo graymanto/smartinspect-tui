@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STAGED_CS_FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.cs' || true)
+
+if [ -n "$STAGED_CS_FILES" ]; then
+    echo "Running CSharpier on staged C# files..."
+    # Format staged files and re-add them to the index
+    echo "$STAGED_CS_FILES" | tr '\n' '\0' | xargs -0 dotnet csharpier format
+    echo "$STAGED_CS_FILES" | tr '\n' '\0' | xargs -0 git add
+fi
+
+# Verify formatting across the repository
+dotnet csharpier check .
