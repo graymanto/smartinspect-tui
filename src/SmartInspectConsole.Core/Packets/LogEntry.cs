@@ -8,6 +8,13 @@ namespace SmartInspectConsole.Core.Packets;
 /// </summary>
 public class LogEntry : Packet
 {
+    public long SequenceId { get; set; }
+
+    public long EstimatedMemoryBytes =>
+        256L
+        + 2L * (AppName.Length + SessionName.Length + Title.Length + HostName.Length)
+        + (Data?.LongLength ?? 0) * 3;
+
     private byte[]? _data;
     private string? _dataAsString;
     private bool _hasDecodedData;

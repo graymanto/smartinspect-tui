@@ -47,6 +47,17 @@ public sealed class MainWindow : Toplevel
     private readonly StatusItem _listenerStatusItem;
     private readonly StatusItem _stateStatusItem;
 
+    private int _pageOffset;
+    private long _pageAnchor;
+    private long _displayedRevision = -1;
+    private bool _refreshBusy;
+    private bool _refreshAgain;
+    private bool _uiStopped;
+    private int _pageRequest;
+    private int _detailRequest;
+    private bool _detailBusy;
+    private bool _detailAgain;
+    private CancellationTokenSource? _filterCancellation;
     private int _selectedFormatIndex;
     private bool _autoScroll;
     private bool _fuzzyEnabled;
@@ -295,16 +306,11 @@ public sealed class MainWindow : Toplevel
 
         var statusBar = new StatusBar([
             new StatusItem(Key.F1, "~F1~ Help", ShowHelpDialog),
-            new StatusItem(Key.F2, "~F2~ Field", ShowFieldSelectorDialog),
-            new StatusItem(Key.F4, "~F4~ Details", ToggleDetailsPane),
             new StatusItem(Key.F6, "~F6~ Pause", TogglePause),
             new StatusItem(Key.F8, "~F8~ AutoScroll", ToggleAutoScroll),
-            new StatusItem(Key.CtrlMask | Key.R, "~^R~ Clear Filters", ResetFilters),
-            new StatusItem(Key.CtrlMask | Key.L, "~^L~ Clear Logs", ClearLogs),
-            new StatusItem(Key.CtrlMask | Key.O, "~^O~ Open .sil", OpenSilFileDialog),
             new StatusItem(Key.CtrlMask | Key.Q, "~^Q~ Quit", () => Application.RequestStop()),
-            _listenerStatusItem,
             _stateStatusItem,
+            _listenerStatusItem,
         ])
         {
             ColorScheme = DarkTheme.MenuScheme,
@@ -317,6 +323,7 @@ public sealed class MainWindow : Toplevel
 
     public void StartUiTimer()
     {
+        _ingestionService.StartProcessing();
         RefreshFullTable();
         UpdateStatusAndHeaders();
         _timerToken = Application.MainLoop.AddTimeout(
@@ -331,6 +338,9 @@ public sealed class MainWindow : Toplevel
 
     public void StopUiTimer()
     {
+        _uiStopped = true;
+        _filterCancellation?.Cancel();
+        _filterCancellation?.Dispose();
         if (_timerToken != null && Application.MainLoop != null)
         {
             Application.MainLoop.RemoveTimeout(_timerToken);
@@ -360,6 +370,8 @@ public sealed class MainWindow : Toplevel
                     new MenuItem("_Cycle Payload Format", "F7", CyclePayloadFormat),
                     new MenuItem("_Toggle Fuzzy Search", "F3", ToggleFuzzy),
                     new MenuItem("_Toggle Auto-Scroll", "F8", ToggleAutoScroll),
+                    new MenuItem("_Previous History Page", "[", () => ChangePage(-1)),
+                    new MenuItem("_Next History Page", "]", () => ChangePage(1)),
                     null!,
                     new MenuItem("_Clear Logs", "Ctrl+L", ClearLogs),
                     new MenuItem("_Clear All Filters", "Ctrl+R", ResetFilters),
@@ -381,41 +393,93 @@ public sealed class MainWindow : Toplevel
 
     private void ProcessBatchTick()
     {
-        var result = _ingestionService.DrainBatch();
-        if (result.HasVisibleChanges)
-        {
+        if (_displayedRevision != _ingestionService.Revision && !_refreshBusy)
             RefreshFullTable();
-            if (_searchField.HasFocus && _autocompleteFrame.Visible)
-            {
-                RefreshAutocompletePopup();
-            }
-        }
-
         UpdateStatusAndHeaders();
     }
 
     private void RefreshFullTable()
     {
-        var previousRow = _logTableView.SelectedRow;
-        var snapshot = _ingestionService.GetFilteredSnapshot();
-        _tableManager.RebuildFromSnapshot(snapshot);
-        _logTableView.Update();
-
-        if (_tableManager.RowCount > 0)
+        _pageRequest++;
+        if (_refreshBusy)
         {
-            if (_autoScroll && !_ingestionService.IsPaused)
-            {
-                _logTableView.SelectedRow = _tableManager.RowCount - 1;
-                _logTableView.EnsureSelectedCellIsVisible();
-            }
-            else if (previousRow >= 0)
-            {
-                _logTableView.SelectedRow = Math.Min(previousRow, _tableManager.RowCount - 1);
-                _logTableView.EnsureSelectedCellIsVisible();
-            }
+            _refreshAgain = true;
+            return;
         }
+        _refreshBusy = true;
+        _refreshAgain = false;
+        var request = _pageRequest;
+        var previousRow = _logTableView.SelectedRow;
+        var previousRowOffset = _logTableView.RowOffset;
+        var selectedId = _tableManager.GetEntryAt(previousRow)?.SequenceId ?? 0;
+        var offset = _pageOffset;
+        var anchor = _pageAnchor;
+        var tail = _autoScroll && !_ingestionService.IsPaused;
+        _ = Task.Run(() =>
+        {
+            LogPage? page = null;
+            string? error = null;
+            try
+            {
+                page = _ingestionService.GetPage(offset, tail, anchor);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+            Application.MainLoop?.Invoke(() =>
+            {
+                _refreshBusy = false;
+                if (_uiStopped)
+                    return;
+                if (request == _pageRequest && page != null)
+                {
+                    _pageOffset = page.Offset;
+                    _pageAnchor = page.Entries.FirstOrDefault()?.SequenceId ?? 0;
+                    _displayedRevision = page.Revision;
+                    _tableManager.RebuildFromSnapshot(page.Entries);
+                    _logTableView.Update();
+                    // TableView can retain a scroll offset beyond a shorter replacement page.
+                    var visibleRows = Math.Max(1, _logTableView.Bounds.Height - 2);
+                    _logTableView.RowOffset = Math.Clamp(
+                        previousRowOffset,
+                        0,
+                        Math.Max(0, page.Entries.Count - visibleRows)
+                    );
+                    if (page.Entries.Count > 0)
+                    {
+                        var selected = page
+                            .Entries.ToList()
+                            .FindIndex(e => e.SequenceId == selectedId);
+                        _logTableView.SelectedRow =
+                            tail ? page.Entries.Count - 1
+                            : selected >= 0 ? selected
+                            : Math.Clamp(previousRow, 0, page.Entries.Count - 1);
+                        _logTableView.EnsureSelectedCellIsVisible();
+                    }
+                    UpdateDetailViewForSelectedRow();
+                    if (_searchField.HasFocus && _autocompleteFrame.Visible)
+                        RefreshAutocompletePopup();
+                }
+                if (error != null)
+                    _stateStatusItem.Title = $"Storage error: {error}";
+                if (_refreshAgain)
+                    RefreshFullTable();
+            });
+        });
+    }
 
-        UpdateDetailViewForSelectedRow();
+    private void ChangePage(int direction)
+    {
+        _autoScroll = false;
+        _settings.AutoScroll = false;
+        _autoScrollButton.Text = GetAutoScrollButtonText();
+        _pageAnchor = 0;
+        _pageOffset = Math.Max(
+            0,
+            _pageOffset + direction * Math.Clamp(_settings.PageSize, 1, 1000)
+        );
+        RefreshFullTable();
     }
 
     private void UpdateStatusAndHeaders()
@@ -428,7 +492,10 @@ public sealed class MainWindow : Toplevel
 
         var filterSummary =
             _activeClauses.Count > 0 ? $" | {_activeClauses.Count} filter(s)" : string.Empty;
-        var frameTitle = $"Logs ({filtered:N0} / {retained:N0}) [{stateTag}{filterSummary}]";
+        var first = _tableManager.RowCount == 0 ? 0 : _pageOffset + 1;
+        var last = Math.Min(filtered, _pageOffset + _tableManager.RowCount);
+        var frameTitle =
+            $"Logs {first:N0}–{last:N0} of {filtered:N0} / {retained:N0} [{stateTag}{filterSummary}] ([/]: pages)";
         if (_logFrame.Title != frameTitle)
         {
             _logFrame.Title = frameTitle;
@@ -445,7 +512,8 @@ public sealed class MainWindow : Toplevel
             : "WS:off";
 
         _listenerStatusItem.Title = $"{tcpPart} {pipePart} {wsPart}";
-        _stateStatusItem.Title = _ingestionService.StatusMessage;
+        _stateStatusItem.Title =
+            $"{_ingestionService.StatusMessage} | Dropped: {_ingestionService.DroppedCount:N0} | Queued: {_ingestionService.PendingBytes / 1048576.0:F1} MiB";
     }
 
     private void OnSearchTextChanged()
@@ -819,9 +887,35 @@ public sealed class MainWindow : Toplevel
             EnableFuzzy = _fuzzyEnabled,
         };
 
-        _ingestionService.UpdateFilter(query);
-        RefreshFullTable();
-        UpdateStatusAndHeaders();
+        _filterCancellation?.Cancel();
+        _filterCancellation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _filterCancellation = cancellation;
+        var token = cancellation.Token;
+        _pageOffset = 0;
+        _pageAnchor = 0;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150, token);
+                await _ingestionService.UpdateFilterAsync(query, token);
+                Application.MainLoop?.Invoke(() =>
+                {
+                    if (!_uiStopped && !token.IsCancellationRequested)
+                        RefreshFullTable();
+                });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Application.MainLoop?.Invoke(() =>
+                {
+                    if (!_uiStopped)
+                        MessageBox.ErrorQuery("Search failed", ex.Message, "OK");
+                });
+            }
+        });
     }
 
     private void TogglePause()
@@ -841,12 +935,8 @@ public sealed class MainWindow : Toplevel
         _autoScroll = !_autoScroll;
         _settings.AutoScroll = _autoScroll;
         _autoScrollButton.Text = GetAutoScrollButtonText();
-        if (_autoScroll && _tableManager.RowCount > 0)
-        {
-            _logTableView.SelectedRow = _tableManager.RowCount - 1;
-            _logTableView.EnsureSelectedCellIsVisible();
-            UpdateDetailViewForSelectedRow();
-        }
+        if (_autoScroll)
+            RefreshFullTable();
     }
 
     private void ToggleFuzzy()
@@ -934,6 +1024,7 @@ public sealed class MainWindow : Toplevel
         var entry = _tableManager.GetEntryAt(_logTableView.SelectedRow);
         if (entry == null)
         {
+            _detailRequest++;
             _detailFrame.Title = "Detail Inspector (F4 to toggle)";
             _detailMetaLabel.Text = "Select a log entry to inspect its payload.";
             _detailTextView.Text = string.Empty;
@@ -941,22 +1032,68 @@ public sealed class MainWindow : Toplevel
         }
 
         var mode = FormatModes[_selectedFormatIndex];
-        var formatted = PayloadFormatter.Format(entry, mode);
-
-        _detailFrame.Title =
-            $"Detail: [{LogTableManager.FormatLevelBadge(entry.LogEntryType).Trim()}] {Truncate(entry.SingleLineTitle, 50)} ({formatted.DetectedFormat}, {formatted.ByteSize:N0} B)";
-        _detailMetaLabel.Text =
-            $"App: {entry.AppName} | Sess: {entry.SessionName} | Host: {entry.HostName} | PID: {entry.ProcessId} | TID: {entry.ThreadId} | Time: {entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff}";
-        _detailTextView.Text =
-            $"Title: {entry.Title}\n"
-            + $"────────────────────────────────────────────────────────────────────────────\n"
-            + formatted.FormattedText;
+        var request = ++_detailRequest;
+        if (_detailBusy)
+        {
+            _detailAgain = true;
+            return;
+        }
+        _detailBusy = true;
+        _detailAgain = false;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var fullEntry = _ingestionService.GetEntry(entry.SequenceId);
+                var formatted =
+                    fullEntry == null ? null : PayloadFormatter.FormatPreview(fullEntry, mode);
+                Application.MainLoop?.Invoke(() =>
+                {
+                    if (_uiStopped || request != _detailRequest)
+                        return;
+                    if (fullEntry == null || formatted == null)
+                    {
+                        _detailTextView.Text = "Entry expired under the retention limit.";
+                        return;
+                    }
+                    _detailFrame.Title =
+                        $"Detail: [{LogTableManager.FormatLevelBadge(fullEntry.LogEntryType).Trim()}] {Truncate(fullEntry.SingleLineTitle, 50)} ({formatted.DetectedFormat}, {formatted.ByteSize:N0} B)";
+                    _detailMetaLabel.Text =
+                        $"App: {entry.AppName} | Sess: {entry.SessionName} | Host: {entry.HostName} | PID: {entry.ProcessId} | TID: {entry.ThreadId} | Time: {entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff}";
+                    _detailTextView.Text =
+                        $"Title: {Truncate(fullEntry.Title, 16384)}\n"
+                        + "────────────────────────────────────────────────────────────────────────────\n"
+                        + formatted.FormattedText;
+                });
+            }
+            catch (Exception ex)
+                when (ex is ObjectDisposedException or Microsoft.Data.Sqlite.SqliteException) { }
+            finally
+            {
+                Application.MainLoop?.Invoke(() =>
+                {
+                    _detailBusy = false;
+                    if (!_uiStopped && _detailAgain)
+                        UpdateDetailViewForSelectedRow();
+                });
+            }
+        });
     }
 
     private void OnTableKeyPress(KeyEventEventArgs args)
     {
         var key = args.KeyEvent.Key;
-        if (key == (Key)'/')
+        if (key == (Key)'[' || key == (Key.CtrlMask | Key.PageUp))
+        {
+            ChangePage(-1);
+            args.Handled = true;
+        }
+        else if (key == (Key)']' || key == (Key.CtrlMask | Key.PageDown))
+        {
+            ChangePage(1);
+            args.Handled = true;
+        }
+        else if (key == (Key)'/')
         {
             _searchField.SetFocus();
             RefreshAutocompletePopup();
@@ -1113,7 +1250,7 @@ public sealed class MainWindow : Toplevel
 
     private void OpenSettingsDialog()
     {
-        var dialog = new Dialog("Settings (F9)", 68, 20) { ColorScheme = DarkTheme.BaseScheme };
+        var dialog = new Dialog("Settings (F9)", 68, 24) { ColorScheme = DarkTheme.BaseScheme };
 
         var tcpCheck = new CheckBox("Enable TCP Listener", _settings.EnableTcp) { X = 2, Y = 1 };
         var tcpPortLabel = new Label("Port:") { X = 32, Y = 1 };
@@ -1162,10 +1299,27 @@ public sealed class MainWindow : Toplevel
             ColorScheme = DarkTheme.InputScheme,
         };
 
+        var diskLabel = new Label("Disk quota MiB (restart):") { X = 2, Y = 9 };
+        var diskField = new TextField((_settings.MaxDiskBytes / 1048576).ToString())
+        {
+            X = 30,
+            Y = 9,
+            Width = 12,
+            ColorScheme = DarkTheme.InputScheme,
+        };
+        var queueLabel = new Label("Queue budget MiB:") { X = 2, Y = 10 };
+        var queueField = new TextField((_settings.MaxPendingBytes / 1048576).ToString())
+        {
+            X = 30,
+            Y = 10,
+            Width = 12,
+            ColorScheme = DarkTheme.InputScheme,
+        };
+
         var otelFrame = new FrameView("OpenTelemetry (OTLP) Relay (Roadmap)")
         {
             X = 1,
-            Y = 9,
+            Y = 12,
             Width = Dim.Fill(1),
             Height = 6,
             ColorScheme = DarkTheme.BaseScheme,
@@ -1239,6 +1393,16 @@ public sealed class MainWindow : Toplevel
                 _settings.MaxLogEntries = maxEntries;
             }
 
+            if (
+                long.TryParse(diskField.Text?.ToString(), out var diskMiB)
+                && diskMiB is >= 2 and <= 1048576
+            )
+                _settings.MaxDiskBytes = diskMiB * 1048576;
+            if (
+                long.TryParse(queueField.Text?.ToString(), out var queueMiB)
+                && queueMiB is >= 1 and <= 1024
+            )
+                _settings.MaxPendingBytes = queueMiB * 1048576;
             _settings.OtelRelay.Enabled = otelEnabledCheck.Checked;
             _settings.OtelRelay.Endpoint =
                 otelEndpointField.Text?.ToString()?.Trim() ?? "http://localhost:4317";
@@ -1270,6 +1434,10 @@ public sealed class MainWindow : Toplevel
             wsPortField,
             maxEntriesLabel,
             maxEntriesField,
+            diskLabel,
+            diskField,
+            queueLabel,
+            queueField,
             otelFrame
         );
         dialog.AddButton(saveButton);
@@ -1296,6 +1464,8 @@ public sealed class MainWindow : Toplevel
             + "  F5         Start / stop network & pipe listeners\n"
             + "  F7         Cycle payload format (Auto, JSON, XML, KeyValue, Hex, Text)\n"
             + "  F8         Toggle Auto-Scroll to newest entries\n"
+            + "  [ / ]      Previous / next history page (table focus)\n"
+            + "  Ctrl+PgUp / Ctrl+PgDn  Page history if supported by your terminal\n"
             + "  F9         Open Settings dialog (Ports, Pipe, Retention, OTel Relay)\n"
             + "  Ctrl+L     Clear all retained and visible log entries\n"
             + "  Ctrl+O     Open a recorded SmartInspect (.sil) file\n"

@@ -50,8 +50,8 @@ public sealed class AutocompleteIndex
         lock (_sync)
         {
             var badge = LogFilterFieldExtensions.GetLevelBadge(entry.LogEntryType);
-            _levels.Add(badge);
-            _levels.Add(entry.LogEntryType.ToString());
+            AddBounded(_levels, badge);
+            AddBounded(_levels, entry.LogEntryType.ToString());
 
             AddBounded(_apps, entry.AppName);
             AddBounded(_sessions, entry.SessionName);
@@ -250,7 +250,7 @@ public sealed class AutocompleteIndex
 
     private static void AddBounded(HashSet<string> set, string? value)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 256)
         {
             return;
         }

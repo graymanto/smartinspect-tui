@@ -29,15 +29,22 @@ public class BinaryPacketReader
         _buffer = payload;
         _position = 0;
 
-        return packetType switch
+        try
         {
-            PacketType.LogEntry => ParseLogEntry(),
-            PacketType.Watch => ParseWatch(),
-            PacketType.ProcessFlow => ParseProcessFlow(),
-            PacketType.ControlCommand => ParseControlCommand(),
-            PacketType.LogHeader => ParseLogHeader(),
-            _ => null,
-        };
+            return packetType switch
+            {
+                PacketType.LogEntry => ParseLogEntry(),
+                PacketType.Watch => ParseWatch(),
+                PacketType.ProcessFlow => ParseProcessFlow(),
+                PacketType.ControlCommand => ParseControlCommand(),
+                PacketType.LogHeader => ParseLogHeader(),
+                _ => null,
+            };
+        }
+        finally
+        {
+            _buffer = [];
+        }
     }
 
     /// <summary>
@@ -324,6 +331,8 @@ public class BinaryPacketReader
         if (length <= 0)
             return [];
 
+        if (length > _buffer.Length - _position)
+            throw new InvalidDataException("Packet data length exceeds the remaining payload.");
         var value = new byte[length];
         Array.Copy(_buffer, _position, value, 0, length);
         _position += length;

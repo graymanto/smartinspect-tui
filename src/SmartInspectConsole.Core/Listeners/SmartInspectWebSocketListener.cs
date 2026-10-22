@@ -271,16 +271,36 @@ public class SmartInspectWebSocketListener : IPacketListener
 
             if (result.MessageType == WebSocketMessageType.Text)
             {
+                if (
+                    (long)messageBuffer.Count + result.Count
+                    > Parsing.BinaryPacketReader.MaxPacketPayloadSize
+                )
+                {
+                    OnError(
+                        new InvalidDataException(
+                            "WebSocket log message exceeds the 16 MiB packet limit."
+                        )
+                    );
+                    await webSocket.CloseOutputAsync(
+                        WebSocketCloseStatus.MessageTooBig,
+                        "Maximum log message size is 16 MiB",
+                        cancellationToken
+                    );
+                    return;
+                }
                 messageBuffer.AddRange(buffer.Take(result.Count));
 
                 if (result.EndOfMessage)
                 {
                     var json = Encoding.UTF8.GetString(messageBuffer.ToArray());
-                    messageBuffer.Clear();
+                    messageBuffer = new List<byte>();
 
                     try
                     {
-                        LogDebug($"Received from {clientId}: {json}");
+                        if (DebugMode)
+                            LogDebug(
+                                $"Received from {clientId}: {json[..Math.Min(json.Length, 1024)]}"
+                            );
                         var packet = JsonPacketConverter.ParsePacket(json, clientId);
                         LogDebug($"Parsed packet: {packet?.GetType().Name ?? "NULL"}");
                         if (packet != null)

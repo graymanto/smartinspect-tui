@@ -32,6 +32,26 @@ public static class PayloadFormatter
         WriteIndented = true,
     };
 
+    // Bound terminal rendering even when a single entry contains a multi-megabyte document.
+    public static FormattedPayloadResult FormatPreview(
+        LogEntry entry,
+        PayloadFormatMode mode = PayloadFormatMode.Auto
+    )
+    {
+        const int maxBytes = 64 * 1024;
+        if (entry.Data == null || entry.Data.Length <= maxBytes)
+            return Format(entry, mode);
+        var preview = new LogEntry { Data = entry.Data[..maxBytes] };
+        var result = Format(preview, mode);
+        return result with
+        {
+            ByteSize = entry.Data.Length,
+            FormattedText =
+                result.FormattedText
+                + "\n… Preview limited to 64 KiB; export .sil for the complete payload.",
+        };
+    }
+
     public static FormattedPayloadResult Format(
         LogEntry entry,
         PayloadFormatMode mode = PayloadFormatMode.Auto

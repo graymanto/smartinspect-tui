@@ -71,6 +71,28 @@ public sealed class LogFilterEngine
 
     public LogFilterQuery Query => _query;
 
+    // FTS is only a candidate accelerator. The existing evaluator remains authoritative.
+    // Non-ASCII titles bypass the accelerator to preserve OrdinalIgnoreCase semantics.
+    internal string? GetIndexedTitleMatch()
+    {
+        if (_query.EnableFuzzy)
+            return null;
+        var groups = _andTokens
+            .Where(t =>
+                t.Field == LogFilterField.Title
+                && !t.Negate
+                && t.Values.Length > 0
+                && t.Values.All(v => v.Length >= 3 && v.All(c => c is >= ' ' and <= '~'))
+            )
+            .Select(t =>
+                "("
+                + string.Join(" OR ", t.Values.Select(v => "\"" + v.Replace("\"", "\"\"") + "\""))
+                + ")"
+            );
+        var match = string.Join(" AND ", groups);
+        return match.Length == 0 ? null : match;
+    }
+
     public bool Matches(LogEntry entry)
     {
         if (

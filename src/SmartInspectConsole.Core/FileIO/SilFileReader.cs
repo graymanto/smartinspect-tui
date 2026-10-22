@@ -12,6 +12,47 @@ public class SilFileReader
 {
     private const string MagicHeader = "SILF";
 
+    public async IAsyncEnumerable<Packet> ReadFileStreamingAsync(
+        string filePath,
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+            CancellationToken cancellationToken = default
+    )
+    {
+        await using var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            65536,
+            true
+        );
+        var magic = new byte[4];
+        if (
+            await BinaryPacketReader.ReadExactlyAsync(stream, magic, 4, cancellationToken) != 4
+            || !magic.AsSpan().SequenceEqual("SILF"u8)
+        )
+            throw new InvalidDataException("Invalid SmartInspect file header; expected SILF.");
+        var reader = new BinaryPacketReader();
+        while (
+            await BinaryPacketReader.ReadPacketHeaderAsync(stream, cancellationToken) is { } header
+        )
+        {
+            var payload = new byte[header.Size];
+            if (
+                await BinaryPacketReader.ReadExactlyAsync(
+                    stream,
+                    payload,
+                    payload.Length,
+                    cancellationToken
+                ) != payload.Length
+            )
+                throw new InvalidDataException("Truncated SmartInspect packet.");
+            var packet = reader.ParsePacket(header.Type, payload);
+            if (packet != null)
+                yield return packet;
+        }
+    }
+
     /// <summary>
     /// Reads all packets from a .sil file.
     /// </summary>

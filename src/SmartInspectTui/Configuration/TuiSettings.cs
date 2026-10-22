@@ -22,7 +22,12 @@ public sealed class TuiSettings
     public int WebSocketPort { get; set; } = SmartInspectWebSocketListener.DefaultPort;
     public bool EnableWebSocket { get; set; } = true;
 
-    public int MaxLogEntries { get; set; } = 20_000;
+    public int MaxLogEntries { get; set; } = 2_000_000;
+    public long MaxPendingBytes { get; set; } = 16L * 1024 * 1024;
+    public int MaxPendingEntries { get; set; } = 10_000;
+    public long MaxDiskBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+    public int PageSize { get; set; } = 500;
+    public string? StorageDirectory { get; set; }
     public bool AutoScroll { get; set; } = true;
     public bool ShowDetailsPane { get; set; } = true;
     public bool EnableFuzzySearch { get; set; } = true;

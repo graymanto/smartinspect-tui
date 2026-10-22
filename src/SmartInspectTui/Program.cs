@@ -80,6 +80,29 @@ public static class Program
                     }
                     break;
 
+                case "--disk-mb":
+                    if (
+                        i + 1 < args.Length
+                        && long.TryParse(args[++i], out var diskMiB)
+                        && diskMiB is >= 2 and <= 1048576
+                    )
+                        settings.MaxDiskBytes = diskMiB * 1048576;
+                    break;
+
+                case "--queue-mb":
+                    if (
+                        i + 1 < args.Length
+                        && long.TryParse(args[++i], out var queueMiB)
+                        && queueMiB is >= 1 and <= 1024
+                    )
+                        settings.MaxPendingBytes = queueMiB * 1048576;
+                    break;
+
+                case "--storage-dir":
+                    if (i + 1 < args.Length)
+                        settings.StorageDirectory = args[++i];
+                    break;
+
                 case "--no-listen":
                     startListeners = false;
                     break;
@@ -154,7 +177,10 @@ public static class Program
               --no-pipe               Disable named pipe listener
               --ws-port <port>        WebSocket listener port (default: 4229)
               --no-ws                 Disable WebSocket listener
-              --max-entries <count>   Maximum retained log entries (default: 20000)
+              --max-entries <count>   Maximum disk history entries (default: 2000000)
+              --disk-mb <MiB>        Disk budget including journal headroom (default: 2048)
+              --queue-mb <MiB>       Incoming queue memory budget (default: 16)
+              --storage-dir <path>   Directory for temporary disk history
               --no-listen             Do not start live listeners automatically on launch
               -h, --help              Show this help message
             """
